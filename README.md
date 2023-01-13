@@ -1,2 +1,2 @@
-# EpigenomicsPractice
-Praciting Epigenomics in R and Python
+# Bioinformatics Practice
+Praciting Multi-omics in R and Python
