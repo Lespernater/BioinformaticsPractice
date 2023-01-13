@@ -1,0 +1,472 @@
+---
+title: "APPENDIX A"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+# Set up
+
+```{r setup, include=TRUE, eval=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(fastqcr)
+library(ShortRead)
+library(FastqCleaner)
+library(Rsamtools)
+library(edgeR)
+library(knitr)
+library(minfi)
+library(factoextra)
+library(lattice)
+library(multiMiR)
+library(dplyr)
+library(limma)
+library(DOSE)
+setwd("/Users/nlespera/Courses/MBI4650F/PCOS/Cleaned_FastQ/")
+```
+
+# Preprocessing before Alignment
+### Quality Filter, Adapter Trimming, Length Filter and N Base Filter
+
+Note: "sample61" - "sample65" are Case and "sample66" - "sample70" are control
+
+```{r Preprocessing, echo=TRUE, eval=FALSE}
+
+# Create FastQC reports
+fastqc(fq.dir = "/Users/nlespera/Courses/MBI4650F/PCOS/Fastq_dir/", fastqc.path = "/Applications/FastQC.app/Contents/MacOS/fastqc")
+
+# Create table for output of filtering results
+tab = matrix(ncol = 6, byrow = TRUE)
+colnames(tab) = c("Sample","Initial Number Reads","Passed Quality Filter","Passed Adapter Removal", "Passed Length Filter", "Passed N base Filter")
+
+# Sequence to be removed from 3' end of each read
+adapter_plus = "TGGAATTCTCGGGTGCCAAGGAACTCCAGTCAC"
+
+files = list.files("/Users/nlespera/Courses/MBI4650F/PCOS/Fastq_dir", full.names = TRUE)
+
+# Loop through all raw FASTQ files to perform filtering and record stats along the way
+for (fastq in files) {
+  temp_ob = ShortRead::readFastq(dirname(fastq), basename(fastq))
+  samp = gsub("SRR138728", "sample", gsub(".fastq.gz", "", basename(fastq)))
+  stats = as.vector(samp)
+  stats = append(stats, length(temp_ob))
+  qcount = rowSums(as(quality(temp_ob), "matrix") <= 29)
+  temp_ob = temp_ob[qcount == 0] # Filter low-quality reads
+  stats = append(stats, length(temp_ob))
+  temp_ob = adapter_filter(temp_ob, Rpattern = adapter_plus) # Trim adapter from 3' end
+  trimmed = count(!(temp_ob@sread@ranges@width == 49))
+  stats = append(stats, trimmed)  
+  temp_ob = length_filter(temp_ob, rm.min = 16, rm.max = 28) # 16-28 nt length filter
+  Ltrimmed = length(temp_ob)
+  stats = append(stats, Ltrimmed)
+  temp_ob = n_filter(temp_ob, rm.N=0) # N base filter
+  Ntrimmed = length(temp_ob)
+  stats = append(stats, Ntrimmed)
+  tab = rbind(tab, stats) # Add stats of filtering to output table
+  
+  # Write new FASTQ file with cleaned reads
+  temp_ob@sread@ranges@NAMES = as.character(1:length(temp_ob))
+  writeXStringSet(temp_ob@sread, paste0(samp,"cleaned.fq"), format="fastq", qualities=temp_ob@quality@quality) 
+}
+```
+
+# RNA sequences into cDNA sequences
+### Performed in Python 3.10.8
+
+```{python RNA to DNA, echo = TRUE, eval=FALSE}
+
+# Replace U with T in reference sequences
+with open('/Users/nlespera/Courses/MBI4650F/PCOS/Bowties/hsa_miRBase.fa', 'r') as file:
+    with open('/Users/nlespera/Courses/MBI4650F/PCOS/Bowties/hsa_miRBase_intoDNA.fa', 'w') as f:
+        for line in file:
+            f.write(line.replace("U", "T"))
+```
+
+
+# Alignment with Bowtie and SAM to BAM with Samtools
+### Performed on command line
+
+Note: Example code only provided for sample labelled "sample70" but code was repeated for all samples with appropriate file names
+
+```{bash Bowtie, echo=TRUE, eval=FALSE}
+
+# Build index with FASTA file of reference sequences
+bowtie-build -f hsa_miRBase_intoDNA.fa miRBase_index 
+
+# Alignment using full sequence (-v mode) 
+# no mismatches or inserdels allowed and only report best matches 
+bowtie -q -v 0 -a --best --strata -S -t -x miRBase_index sample70cleaned.fq sample70cleaned.sam
+
+# Convert SAM to BAM
+samtools view -S -b sample70cleaned.sam > sample70cleaned.bam
+
+# Sort BAM file
+samtools sort sample70cleaned.bam > sample70sorted.bam
+
+# Index sorted BAM file
+samtools index sample70sorted.bam
+```
+
+
+# Aligned sequences imported back into R
+
+
+```{r Samtools in R, echo=TRUE, eval=FALSE}
+
+# Building Parameter and Flag Constructors for scanBam
+flag_mapped = scanBamFlag(isPaired = FALSE, isProperPair = NA, isUnmappedQuery = FALSE, isSecondaryAlignment = FALSE)
+params_mapped = ScanBamParam(flag = flag_mapped, what = scanBamWhat())
+
+# Looping through each sample's sorted bam file and create csv file of aligned reads
+files = list.files("/Users/nlespera/Courses/MBI4650F/PCOS/Cleaned_FastQ/Bams", pattern = "\\.bam$", full.names = FALSE)
+
+setwd("/Users/nlespera/Courses/MBI4650F/PCOS/Cleaned_FastQ/Bams")
+for (bam in files) {
+  temp_ob = scanBam(bam,paste0(bam,".bai"), param=params_mapped)
+  temp_df = as.data.frame(table(temp_ob[[1]]$rname))
+  # Order reads by decreasing frequency
+  temp_df = temp_df[order(temp_df$Freq, decreasing = TRUE),]
+  names(temp_df) = c('miRNA',gsub("sorted.bam","",bam))
+  
+  # Write to csv to be able to import easily at a later date
+  write.csv(temp_df,paste0("/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/",gsub("sorted.bam","_reads.csv",bam)), row.names = FALSE)
+}
+```
+
+
+# Merging miRNA read data
+
+```{r Read aligned counts, echo=TRUE, eval=FALSE}
+
+# Merging csvs into single dataframe of miRNA reads
+files = list.files("/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads", pattern="\\_reads.csv$", full.names = TRUE)
+
+counts = read.csv(files[1])
+
+for (reads in files[2:10]) {
+  tempdf = read.csv(file = reads, header = TRUE)
+  counts = merge(counts, tempdf, by="miRNA")
+}
+
+# Use miRNA column as names of rows instead and then order by rowSums
+rownames(counts) = counts[,1]
+counts = counts[,-1]
+counts = counts[order(rowSums(counts), decreasing = TRUE),]
+
+# Write to csv to be able to import easily at a later date
+write.csv(counts,"/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/raw_counts.csv", row.names = TRUE)
+```
+
+
+# Processing before Differential Analysis
+
+### Removing low read counts and TMM normalization
+
+```{r edgeR Counts per Million first normalization, eval=TRUE, eval=FALSE}
+
+# Define group of each sample
+group = c("PCOS", "PCOS", "PCOS", "PCOS", "PCOS", "Control", "Control", "Control", "Control", "Control")
+
+# Investigating expression by histogram to determine minimal expression cutoff 
+# Counts per million in log2 values
+cpm_log = cpm(counts, log = TRUE)
+median_log2_cpm = apply(cpm_log, 1, median)
+mean_log2_cpm = apply(cpm_log, 1, mean)
+hist(median_log2_cpm)
+hist(mean_log2_cpm)
+expr_cutoff = -1 
+# By histogram inspection see low expression cutoff of -1 for both median and mean
+
+counts_clean_mean = counts[mean_log2_cpm > expr_cutoff,]
+counts_clean_med = counts[median_log2_cpm > expr_cutoff,]
+# Mean cutoff gave 736 and median cutoff gave 733
+
+# Used mean log2 cpm above -1 to define minimal expression
+counts_clean = counts[mean_log2_cpm > expr_cutoff,]
+
+# Create DGElist object from counts of 736 miRNAs
+diff_ex = DGEList(counts = counts_clean, group = group)
+
+# TMM Normalization
+diff_ex = calcNormFactors(diff_ex)
+
+# View and write to csv the table of library size and normalization factors
+libsize_norm_table = kable(diff_ex$samples)
+write.csv(diff_ex$samples, "/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/libsize_normfact.csv",row.names = TRUE)
+
+# Counts per million of 736 miRNAs with at least minimal expression 
+# (without normalization)
+cpm_log = cpm(counts_clean, log = TRUE, normalized.lib.sizes = FALSE)
+
+# (with normalization)
+cpm_log_normed = cpm(diff_ex, log=TRUE, normalized.lib.sizes = TRUE)
+
+# Co-opting minfi DensityPlot to show distribution of cpm before and after normalization
+pdf("Density_BeforeTMM.pdf")
+densityPlot(cpm_log, sampGroups = diff_ex$samples$group, xlim = range(-5:20), xlab = "CPM (log2)", main = "Before TMM Normalization")
+dev.off()
+
+pdf("Density_AfterTMM.pdf")
+densityPlot(cpm_log_normed, sampGroups = diff_ex$samples$group, xlim = range(-5:20), xlab = "CPM (log2)", main = "After TMM Normalization")
+dev.off()
+```
+
+
+### Principal Component Analysis and Outlier Removal
+
+```{r PCA, echo=TRUE, eval=FALSE}
+
+# Run PCA with samples in rows and variables in columns
+PCA = prcomp(t(cpm_log_normed), scale = TRUE, center = TRUE)
+PCs = PCA$x
+
+# Assign each PC to its own variable
+for (i in seq(1:9)){
+  assign(paste0("PC", i), PCA$x[,i])
+}
+
+# Scree plot of variance explained 
+fviz_eig(PCA, geom = "bar", main="Variance Explained by PC", xlab = "PC") 
+
+
+# Investigate outliers by density plot
+densityplot(PC1,pch=19,col="blue", main="PC1 Distribution")
+densityplot(PC2,pch=19,col="blue", main="PC2 Distribution")
+densityplot(PC3,pch=19,col="blue", main="PC3 Distribution")
+densityplot(PC4,pch=19,col="blue", main="PC4 Distribution")
+densityplot(PC5,pch=19,col="blue", main="PC5 Distribution")
+densityplot(PC6,pch=19,col="blue", main="PC6 Distribution")
+densityplot(PC7,pch=19,col="blue", main="PC7 Distribution")
+densityplot(PC8,pch=19,col="blue", main="PC8 Distribution")
+densityplot(PC9,pch=19,col="blue", main="PC9 Distribution")
+
+# Investigate outliers in PC1 using +/- 2.5 SD cutoff
+a = subset(PC1, PC1 > (mean(PC1)+2.5*sd(PC1)))
+b = subset(PC1, PC1 < (mean(PC1)-2.5*sd(PC1)))
+outliers = c(a,b)
+
+# Investigate outliers in remaining PCs using +/- 2.5 SD cutoff
+for (i in seq(2:9)){
+  a = subset(PCA$x[,i], PCA$x[,i] > (mean(PCA$x[,i])+2.5*sd(PCA$x[,i])))
+  b = subset(PCA$x[,i], PCA$x[,i] < (mean(PCA$x[,i])-2.5*sd(PCA$x[,i])))
+  out = c(a,b)
+  outliers = append(outliers, out)
+}
+# Identified sample67 as outlier to be removed
+```
+
+### PCA repeated after outlier removal
+
+```{r PCA Redo without outlier, echo=TRUE, eval=FALSE}
+
+# Redo building DGElist object, TMM normalization and counts per million 
+# with sample 67 removed
+diff_ex_redo = DGEList(counts = counts_clean[,-7], group = group[-7])
+diff_ex_redo = calcNormFactors(diff_ex_redo)
+cpm_log_normed_redo = cpm(diff_ex_redo, log=TRUE, normalized.lib.sizes = TRUE)
+
+# Redo PCA with samples in rows and variables in columns
+PCAredo = prcomp(t(cpm_log_normed_redo), scale = TRUE, center = TRUE)
+PCsredo = PCAredo$x
+
+# Reassigning all PCs
+for (i in seq(1:9)){
+  assign(paste0("PC", i), PCAredo$x[,i])
+}
+
+# Scree plot of variance explained 
+fviz_eig(PCAredo, geom = "bar", main="Variance Explained by PC", xlab = "PC") 
+
+# Investigate outliers by density plot
+densityplot(PC1,pch=19,col="blue", xlab = "New PC1", main="New PC1 Distribution")
+densityplot(PC2,pch=19,col="blue", xlab = "New PC2", main="New PC2 Distribution")
+densityplot(PC3,pch=19,col="blue", xlab = "New PC3", main="New PC3 Distribution")
+densityplot(PC4,pch=19,col="blue", xlab = "New PC4", main="New PC4 Distribution")
+densityplot(PC5,pch=19,col="blue", xlab = "New PC5", main="New PC5 Distribution")
+densityplot(PC6,pch=19,col="blue", xlab = "New PC6", main="New PC6 Distribution")
+densityplot(PC7,pch=19,col="blue", xlab = "New PC7", main="New PC7 Distribution")
+densityplot(PC8,pch=19,col="blue", xlab = "New PC8", main="New PC8 Distribution")
+densityplot(PC9,pch=19,col="blue", xlab = "New PC9", main="New PC9 Distribution")
+
+# Investigate outliers in PC1 using +/- 2.5 SD cutoff
+a = subset(PC1, PC1 > (mean(PC1)+2.5*sd(PC1)))
+b = subset(PC1, PC1 < (mean(PC1)-2.5*sd(PC1)))
+outliers = c(a,b)
+
+# Investigate outliers in remaining PCs using +/- 2.5 SD cutoff
+for (i in seq(2:8)){
+  a = subset(PCAredo$x[,i], PCAredo$x[,i] > (mean(PCAredo$x[,i])+2.5*sd(PCAredo$x[,i])))
+  b = subset(PCAredo$x[,i], PCAredo$x[,i] < (mean(PCAredo$x[,i])-2.5*sd(PCAredo$x[,i])))
+  out = c(a,b)
+  outliers = append(outliers, out)
+}
+# No more outliers
+
+# Visualize distribution of cpm before and after normalization again
+pdf("BeforeTMM.pdf")
+densityPlot(cpm_log[,-7], sampGroups = diff_ex$samples$group[-7], xlim = range(-5:20), xlab = "CPM (log2)", main = "Before TMM Normalization")
+dev.off()
+
+pdf("AfterTMM.pdf")
+densityPlot(cpm_log_normed_redo, sampGroups = diff_ex_redo$samples$group, xlim = range(-5:20), xlab = "CPM (log2)", main = "After TMM Normalization")
+dev.off()
+```
+
+
+# Building Correlation Matrix
+
+```{r Correlation Matrix, echo=TRUE, eval=FALSE}
+
+# Read in metadata downloaded from SRA Run Selector
+pData = read.table("metadata.txt", sep=",", header=TRUE)
+
+# Create table with metadata (age, group) together with PCs
+targets = as.data.frame(pData$Age[-7], row.names = row.names(PCsredo))
+targets = cbind(targets, group[-7])
+colnames(targets) = c("Age","Group")
+targets$Group = as.factor(targets$Group)
+targetsPCs = merge(targets, PCsredo, by.x="row.names", by.y="row.names")[,-1]
+
+# Create Correlation Matrix with Group, Age and first 7 PCs
+pdf("Correlation_Matrix_PCAredo.pdf")
+twolines = function(x,y) {
+  points(x,y,pch=16, col=targetsPCs$Group)
+  abline(lm(y~x),col="blue")
+  legend("bottomright", paste("R=",prettyNum(cor(x,y), digits=3)),bty="n" ,cex=0.5)
+}
+
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y, use="complete.obs"))
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+mydiag.panel <- function( x,  labels, ...){
+  ll <- par("usr")
+  rect(ll[1], ll[3], ll[2], ll[4], col="cadetblue1")
+}
+
+diag.labels=c("Group","Age", "PC1", "PC2","PC3", "PC4", "PC5", "PC6","PC7")
+
+plot.formula=as.formula(~Group+Age+PC1+PC2+PC3+PC4+PC5+PC6+PC7)
+
+pairs(plot.formula, data=targetsPCs, upper.panel=twolines, labels=diag.labels, diag.panel=mydiag.panel, lower.panel=panel.cor, label.pos=0.5, main="Correlation Between Variables")
+dev.off()
+```
+
+
+# Differential Expression Analysis
+
+```{r edgeR DEA, echo=TRUE, eval=FALSE}
+
+# Creating independent variable and age covariate for simplicity in design matrix
+Diagnosis = factor(targetsPCs$Group)
+Age <- as.numeric(targetsPCs$Age)
+
+# Trying variety of design matrices
+design1 = model.matrix(~Diagnosis)
+design2 = model.matrix(~Diagnosis+Age)
+design3 = model.matrix(~Diagnosis+Age+PC1+PC4+PC5+PC6+PC7)
+design4 = model.matrix(~Diagnosis+Age+PC1+PC5+PC6+PC7)
+design5 = model.matrix(~Diagnosis+Age+PC5+PC6+PC7) 
+# Note: results from design 5 ultimately used for downstream analysis
+
+design = matrix(list(design1,design2,design3,design4,design5))
+
+# Using Bonferroni multiple test correction to define significant results
+  Ntests = nrow(counts_clean[,-7])
+  pval = 0.01/Ntests
+
+for (i in seq(1:5)){
+  # Estimate tagwise dispersion for exact test that follows
+  diff_ex_disp = estimateDisp(diff_ex_redo, design = design[[i]])
+  
+  # Exact test for difference in groups by comparing expression levels of all 736 miRNAs, order by p value then write to csv
+  et = exactTest(diff_ex_disp)  
+  results_edgeR = as.data.frame(topTags(et, n = nrow(counts_clean[,-7]), sort.by = "p.value"))
+  write.csv(results_edgeR,paste0("/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/diff_redo_design",i,".csv"), row.names = TRUE)
+  
+  # Select only miRNAs with significant DE and write to csv file
+  sig_results_edgeR = subset(results_edgeR, results_edgeR$PValue < pval) 
+  write.csv(sig_results_edgeR,paste0("/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/sigdiff_redo_design",i,".csv"), row.names = TRUE)
+}
+```
+
+
+# Gene Targeting
+
+```{r Gene Targeting before Enrichment Analysis, echo=TRUE, eval=FALSE}
+
+# Get universe gene set as Entrz IDs
+# From targets of all 736 miRNAs investigated
+universe_miR = rownames(results_edgeR)
+UNIgenes = get_multimir(org = "hsa", mirna = universe_miR)
+universe = unique(UNIgenes@data$target_entrez)
+
+# Get ENTREZ IDs of validated target genes = gene set A 
+# From targets of all 11 DE miRNAs
+sig_miRs = rownames(sig_results_edgeR)
+sigTARgenes = get_multimir(org = "hsa", mirna = sig_miRs, summary = TRUE)
+sig_genesetA = unique(sigTARgenes@data$target_entrez)
+
+# Get ENTREZ IDs of validated target genes = gene set B
+# From targets of top3 upreg and top3 downreg DE miRNAs
+sig_3UpDown = c("hsa-miR-10a-5p", "hsa-miR-205-5p", "hsa-miR-1304-3p", "hsa-miR-204-5p","hsa-miR-184","hsa-miR-4707-3p")
+upDowns = get_multimir(org = "hsa", mirna = sig_3UpDown, summary = TRUE)
+# Only those experimentally validated 2 or more times
+upDowns_strict = subset(upDowns@data$target_entrez, upDowns@summary$validated.sum > 1)
+sig_genesetB = unique(upDowns_strict)
+```
+
+
+# KEGG Pathway Enrichment Analysis
+
+
+```{r KEGG and DisGeNET enrichment analysis, echo=TRUE, eval=FALSE}
+
+# KEGG analysis of each gene set
+keggA = kegga(sig_genesetA, universe = universe, species="Hs", pval = 0.01, p.adjust.methods = "bonferroni")
+keggA = keggA %>% arrange(P.DE)
+keggA$KEGG_label = rownames(keggA)
+
+keggB = kegga(sig_genesetB, universe = universe, species="Hs", pval = 0.01, p.adjust.methods = "bonferroni")
+keggB = keggB %>% arrange(P.DE)
+keggB$KEGG_label = rownames(keggB)
+
+# Investigate significant pathways P.DE < 0.01
+KEGG_sigPDE_A = subset(keggA, keggA$P.DE < 0.01)
+KEGG_sigPDE_B = subset(keggB, keggB$P.DE < 0.01)
+
+#Top 30 results from KEGG of each gene set
+KEGG_enrichA = topKEGG(keggA, number = 30L)
+KEGG_enrichB = topKEGG(keggB, number = 30L)
+
+
+# Write results of each KEGG analysis to csv
+write.csv(as.data.frame(KEGG_enrichA),"/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/KEGG_A.csv", row.names = FALSE)
+write.csv(as.data.frame(KEGG_enrichB),"/Users/nlespera/Courses/MBI4650F/PCOS/Aligned_Reads/KEGG_B.csv", row.names = FALSE)
+```
+
+# DisGeNET Enrichment Analysis
+
+```{r DisGeNET enrichment analysis, echo=TRUE, eval=FALSE}
+
+# DisGeNET enrichment analysis of top 20 NCG categories for each gene set
+edoA = enrichDGN(sig_genesetA, universe = universe, pvalueCutoff = 0.01, pAdjustMethod = "bonferroni")
+
+edoB = enrichDGN(sig_genesetB, universe = universe, pvalueCutoff = 0.01, pAdjustMethod = "bonferroni")
+
+pdf("MIRdotplotA_new.pdf")
+dotplot(edoA, showCategory=20, color = 'pvalue')
+dev.off()
+
+pdf("MIRdotplotB_new.pdf")
+dotplot(edoB, showCategory=20, color = 'pvalue')
+dev.off()
+```
