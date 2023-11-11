@@ -1,5 +1,5 @@
 ---
-title: "Assignment 3"
+title: "Random forest classifier for insecta taxonomy with k-mer feature selection from CytB sequences"
 author: "Nathaniel Lesperance"
 date: "2023-11-05"
 output: pdf_document
