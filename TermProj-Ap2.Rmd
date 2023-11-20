@@ -1,0 +1,605 @@
+---
+title: "TermProj-Apr2"
+output: html_document
+date: "2023-04-02"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Import FastQs of metagenomic data
+
+
+```{SRA-Toolkit Accension query}
+
+# SRP002840    # This is crAssphage Accension #
+
+fasterq-dump -v -v ERR10856031    
+fasterq-dump -v -v ERR10852873
+fasterq-dump -v -v ERR10856075
+fasterq-dump -v -v ERR10867126
+fasterq-dump -v -v ERR10856050
+
+```
+
+```{FastQC and MultiQC}
+
+fastqc -o ../fastqc_reports --extract --delete -f fastq ERR10856031_1.fastq.gz ERR10856031_2.fastq.gz ERR10852873_1.fastq.gz ERR10852873_2.fastq.gz ERR10856075_1.fastq.gz ERR10856075_2.fastq.gz ERR10867126_1.fastq.gz ERR10867126_2.fastq.gz ERR10856050_1.fastq.gz ERR10856050_2.fastq.gz
+
+-f (or --format) to specify file format
+
+-o (or --output) to specify output directory
+
+-j (or --java) to set path of java to use
+
+--extract to extract reports once creaated (and --delete to delete these once uncompressed)
+
+# Compiled multiQC report from these fastqc reports
+multiqc -i First_Reports fastqc_reports
+```
+
+
+FASTQC indicates no adapters or overrepresented sequences, only warnings/fails in per sequence base content most likely as a result of random hexamers in amplification - see MultiQC
+
+Confirm using fastp that no need for:
+
+## Quality filter, adapter trim, etc
+
+``` {FASTP}
+# Most strict filtering - quality 30 or above, no N bases
+fastp -i ERR10854492_1.fastq -o samp1_cleanA.fastq -I ERR10854492_2.fastq -O samp1_cleanB.fastq -q 30 -n 0 --detect_adapter_for_pe -h Mar11_1.html -j Mar11_1.json
+
+-L no Length filtering
+-y low complexity filtering (-Y to specify percentage = default is 30 %)
+--detect_adapter_for_pe detects adapters and distribution trimmed adapters found at HTML report
+
+-c uses overlap analysis to correct mismatched pairs where 1 is high-quality and the other is low quality (enabled by default for pe)
+
+--trim_poly_g is enabled by default for NovaSeq data
+--interleaved_in (reads 1 and 2 are both in same fastq)
+
+-h html format report file name
+-j json format report file name
+
+fastp -i ERR10856031_1.fastq.gz -I ERR10856031_2.fastq.gz -q 20 -n 0 --detect_adapter_for_pe -h fastp_samp01.html
+
+fastp -i ERR10852873_1.fastq.gz -I ERR10852873_2.fastq.gz -q 20 -n 0 --detect_adapter_for_pe -h fastp_samp02.html
+
+fastp -i ERR10856075_1.fastq.gz -I ERR10856075_2.fastq.gz -q 20 -n 0 --detect_adapter_for_pe -h fastp_samp03.html
+
+fastp -i ERR10867126_1.fastq.gz -I ERR10867126_2.fastq.gz -q 20 -n 0 --detect_adapter_for_pe -h fastp_samp04.html
+
+fastp -i ERR10856050_1.fastq.gz -I ERR10856050_2.fastq.gz -q 20 -n 0 --detect_adapter_for_pe -h fastp_samp05.html
+
+
+```
+
+
+Host Filtered already - confirmed by alignment with bowtie2
+
+
+
+## Host Alignment
+
+```{Alignment to Host Genome}
+
+bowtie2 -1 samp2_cleanA.fastq -2 samp2_cleanB.fastq -k 1 -x GRCh38_noalt_as --local 
+-1 <mate-pair1> -2 <mate-pair2>
+-k 1 (-k mode with 1 distinct alignment only)
+-x index file basename 
+
+# Take unaligned through to further analysis
+
+# On the server
+bowtie2 -1 ERR10854492_1.fastq -2 ERR10854492_2.fastq -k 1 -x GRCh38_noalt_as >> samp1_bt2.SAM
+
+
+--un-conc-gz write unaligned reads to <path> and compress output
+
+
+--end-to-end is the default mode but should try --local as well
+
+-D might be worth changing (default 15)
+--no-mixed (dont look for alignment with individuals if both pairs fail together)
+--no-discordant (dont look for alignment in one mate pair if the other fails)
+
+
+put GRCh38_noalt_as.2.bt2
+put GRCh38_noalt_as.3.bt2
+put GRCh38_noalt_as.4.bt2
+put GRCh38_noalt_as.rev.1.bt2
+put GRCh38_noalt_as.rev.2.bt2
+```
+
+Appears the reads have already been host-filtered and adapter trimmed
+
+
+
+
+## De Novo Assembly
+
+```{Bash Running metaSPAdes Assembly Tool}
+#Mar 30
+spades.py --meta --12 ERR10856031.fastq -o /home/nlespera/TermProject/spades_results/spds_samp01_D -m 32
+
+spades.py --meta --12 ERR10852873.fastq -o /home/nlespera/TermProject/spades_results/spds_samp02_D -m 32
+
+spades.py --meta --12 ERR10856075.fastq -o /home/nlespera/TermProject/spades_results/spds_samp03_D -m 32 -t 8
+
+spades.py --meta --12 ERR10867126.fastq -o /home/nlespera/TermProject/spades_results/spds_samp04_D -m 32 -t 8
+
+spades.py --meta -1 ERR10856050_1.fastq -2 ERR10856050_2.fastq -o /home/nlespera/TermProject/spades_results/spds_samp05_D -m 32 -t 8
+
+
+-t threads
+-m memory limit
+-12 interleaved reads
+--careful reccomended for 150 bp reads (but cant use with --meta)
+
+-k 21,33,55,77 k-mer lengths reccomended for 150 bp reads (if we have enough coverage (x50+))
+
+
+# Apr1
+
+Any difference
+
+```
+
+
+
+Healthy:
+samp01_D = ERR10856031
+samp02_D = ERR10852873
+samp03_D = ERR10856075
+samp04_D = ERR10867126
+samp05_D = ERR10856050 (not interleaved)
+
+
+spds_samp01_D - spades results of sample 1 (Disease state) - 
+spds_samp02_D - spades results of sample 2 (Disease state)
+spds_samp03_D - spades results of sample 3 (Disease state)
+spds_samp04_D - spades results of sample 4 (Disease state)
+spds_samp05_D - spades results of sample 5 (Disease state)
+
+
+fasterq-dump -v -v ERR10856050
+
+
+
+spds_samp06_C - spades results of sample 6 (Control)
+spds_samp07_C - spades results of sample 7 (Control)
+spds_samp08_C - spades results of sample 8 (Control)
+spds_samp09_C - spades results of sample 9 (Control)
+spds_samp10_C - spades results of sample 10 (Control)
+
+
+
+Script to grab contigs above 10K
+
+```{python}
+from Bio import SeqIO
+contigs = SeqIO.parse(open("contigs.fasta"), "fasta")
+count = 0
+with open("contigs_10Kplus.fasta", "w") as fileout:
+  for fasta in contigs:
+    if len(fasta) > 10000:
+      SeqIO.write(fasta, fileout, "fasta")
+      count += 1
+
+#samp01 - 842
+#samp02 - 512
+#samp03 - 756
+#samp04 - 603
+#samp05 - 1104
+
+```
+
+
+
+# Script to calculate NX0 - N10, N20, N30 etc
+
+```{python}
+from Bio import SeqIO
+import csv
+contigs = SeqIO.parse(open("contigs.fasta"), "fasta")
+sum_length = 0
+tracking = []
+for fasta in contigs:
+    tracking.append((fasta.id,sum_length, sum_length + len(fasta)))
+    sum_length += len(fasta)
+
+
+with open("NX0_samp1-5.csv", "w") as csv_file:
+    i = 1
+    writer = csv.writer(csv_file)
+    writer.writerow(["NX0","Fasta ID", "Length"])
+    for record in tracking:
+        if i < 10 and record[1] < i*sum_length//10 and record[2] > i*sum_length//10:
+            writer.writerow([f"N{i}0",record[0], record[2]-record[1]])
+            i += 1
+
+```
+
+
+
+
+
+
+``` {QUAST evaluation of assembly}
+metaquast.py -m 10000 --unique-mapping --x-for-Nx 90 -t 2 /home/nlespera/TermProject/spades_results/spds_samp01_D/contigs.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10856031.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp01 
+
+
+--unique-mapping
+--pe12 (interlaced fastq, gzip compressed allowed)
+--x-for-Nx <int> (report more than just N50)
+--min-contig (or -m) <int> (default = 500)
+
+# Compiled command that was run:
+  
+/home/nlespera/.local/bin/quast.py -1 ERR10854492_1.fastq -2 ERR10854492_2.fastq --min-identity 90.0 --combined-ref --colors #E31A1C --ls solid --ambiguity-usage all contigs.fasta -R /home/nlespera/TermProject/seqs/quast_results/results_2023_03_27_11_10_51/quast_corrected_input/combined_reference.fasta -o /home/nlespera/TermProject/seqs/quast_results/results_2023_03_27_11_10_51/combined_reference --labels contigs
+
+
+
+
+Can specify --blast-db <path>
+
+```
+
+
+
+
+gzip ERR10867126.fastq
+
+
+
+
+```{BLAST of contigs}
+
+blastn -query top10_contigs.fasta -remote -task blastn -out BLASTN_results_Mar16 -db ref_viruses_rep_genomes
+
+-outfmt 18 (organism report)
+-remote uses NCBI databases so I dont have to maintain them (cant change threads)
+
+database options here:
+  https://github.com/ncbi/blast_plus_docs#blast-databases 
+
+```
+
+
+
+
+```{BLAST of contigs with e-value cutoff - Mar 26}
+
+blastn -query top10_contigs.fasta -remote -task blastn -out BLASTN_results_Mar26a -db ref_viruses_rep_genomes -evalue 1e-40
+
+database options here:
+  https://github.com/ncbi/blast_plus_docs#blast-databases 
+
+```
+
+
+
+```{BLAST of contigs with e-value cutoff - Mar 26}
+# Above were keeping too many sequences so just stop searching when 1 match found above e-value threshold - using -max_target_seqs and -max_hsps
+
+blastn -query top10_contigs.fasta -remote -task blastn -out BLASTN_results_Mar26b -db ref_viruses_rep_genomes -evalue 1e-40 -outfmt "0 qaccver saccver pident length mismatch" -max_target_seqs 1 -max_hsps 1
+
+blastn -query top10_contigs_under50K.fasta -remote -task blastn -out BLASTN_results_Mar26c -db ref_viruses_rep_genomes -evalue 1e-20 -max_target_seqs 1 -max_hsps 1
+
+blastn -query 10top20_contigs.fasta -remote -task blastn -out BLASTN_results_Mar27a -db ref_viruses_rep_genomes -evalue 1e-10 -max_target_seqs 1 -max_hsps 1 -word_size 28
+
+
+
+NEED TO CHANGE WORD-SIZE (28 maybe)
+```
+
+
+# Relaxed samp1 BLASTN
+blastn -query /home/nlespera/TermProject/spades_results/spds_samp01_D/top10under50K_contigs.fasta -remote -task blastn -out samp01_top10u50K_rlxt_mar30 -db ref_viruses_rep_genomes -max_target_seqs 1 -max_hsps 1
+
+
+# Strict samp2 BLASTN - no hits
+blastn -query /home/nlespera/TermProject/spades_results/spds_samp01_D/top10under50K_contigs.fasta -remote -task blastn -out samp01_top10u50K_mar30 -db ref_viruses_rep_genomes -evalue 1e-10 -max_target_seqs 1 -max_hsps 1 -word_size 28
+
+
+# Relaxed samp2 BLASTN
+blastn -query /home/nlespera/TermProject/spades_results/spds_samp02_D/top10under50K_contigs.fasta -remote -task blastn -out samp02_top10u50K_rlxt_mar30 -db ref_viruses_rep_genomes -max_target_seqs 1 -max_hsps 1
+
+
+# BareBones BLASTN samp02 - incomplete
+blastn -query /home/nlespera/TermProject/spades_results/spds_samp02_D/top10under50K_contigs.fasta -remote -task blastn -out samp02_top10u50K_bb_mar30 -db ref_viruses_rep_genomes
+
+# BareBones w/ e-val cutoff BLASTN samp02
+blastn -query /home/nlespera/TermProject/spades_results/spds_samp02_D/top10under50K_contigs.fasta -remote -task blastn -out samp02_top10u50K_bb_mar30 -db ref_viruses_rep_genomes -evalue 1e-10
+
+
+
+```{R - using VirFinder to filter for virus-like sequences}
+library(VirFinder)
+predict = VF.pred("contigs_10Kplus.fasta")
+predict = predict[order(predict$pvalue),]
+write.csv(predict, "VirFinder_10Kplus_Apr2.csv", row.names = TRUE)
+```
+
+
+Try using QUAST with all contigs above 10K from all 5 samples against ref_viruses_rep_genomes NCBI database 
+
+
+
+``` {QUAST evaluation of assembly}
+# orginal process call 
+metaquast.py -m 10000 --unique-mapping -t 4 /home/nlespera/TermProject/spades_results/spds_samp01_D/contigs.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10856031.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp01 
+
+
+--unique-mapping
+--pe12 (interlaced fastq, gzip compressed allowed)
+--x-for-Nx <int> (report more than just N50)
+--min-contig (or -m) <int> (default = 500)
+--fast (minimal stats)
+
+Can specify --blast-db <path>
+
+# Apr 2 call - not finding .nsq blast-db and reusing BLAST results
+metaquast.py --blast-db /home/nlespera/TermProject/quasts/vir_db/ref_viruses_rep_genomes.nsq -m 10000 -t 4 /home/nlespera/TermProject/spades_results/spds_samp05_D/contigs.fasta -1 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_1.fastq.gz -2 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_2.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp05 
+  
+# got rid of output directory to use default to force not to reuse
+metaquast.py --blast-db /home/nlespera/TermProject/quasts/vir_db/ref_viruses_rep_genomes.nsq -m 10000 -t 4 /home/nlespera/TermProject/spades_results/spds_samp05_D/contigs.fasta -1 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_1.fastq.gz -2 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_2.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp05 
+
+# Sample 5 not getting any reference genomes from NCBI? 
+
+# Samp02 instead - ERR10852873 - not finding any NCBI sequences - maybe download them and include them instead
+metaquast.py --blast-db /home/nlespera/TermProject/quasts/vir_db/ref_viruses_rep_genomes.nsq -m 10000 -t 4 /home/nlespera/TermProject/spades_results/spds_samp02_D/contigs.fasta --pe12 /home/nlespera/TermProject/seqs/raw_seqs/ERR10852873.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp02
+
+```
+
+
+Rerun plain old metaquast (with default bacterial SILVA 16s rRNA database)
+
+```{simple SILVA metaquast}
+# Need to rerun -> have --unique mapping results right now
+metaquast.py -m 10000 -t 4 /home/nlespera/TermProject/spades_results/spds_samp01_D/contigs.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10856031.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp01/SILVA
+
+# run Apr 2 
+metaquast.py -m 10000 -t 2 /home/nlespera/TermProject/spades_results/spds_samp02_D/contigs.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10852873.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp02/SILVA
+
+metaquast.py -m 10000 -t 2 /home/nlespera/TermProject/spades_results/spds_samp03_D/contigs.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10856075.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp03/SILVA
+
+metaquast.py -m 10000 -t 4 /home/nlespera/TermProject/spades_results/spds_samp04_D/contigs.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10867126.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp04/SILVA
+
+metaquast.py -m 10000 -t 4 /home/nlespera/TermProject/spades_results/spds_samp05_D/contigs.fasta -1 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_1.fastq.gz -2 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_2.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp05/SILVA
+```
+
+^^Maybe should rerun these with split read files - maybe not - they take forever
+samp05 not kicked wiht same error as others at corrected combined reference
+
+
+
+Build combined contigs with <0.90 and <0.80 score for Virus from VirFinder
+
+```{python}
+from Bio import SeqIO
+import csv
+
+with open("/home/nlespera/TermProject/vir_contigs/combined_VirFinder_results_Apr2.csv", "r") as combined:
+    reader = csv.reader(combined)
+    next(reader)
+    contig_list_90 = [row[1] for row in reader if float(row[3]) > 0.9]
+    combined.seek(0)
+    next(reader)
+    contig_list_80 = [row[1] for row in reader if float(row[3]) > 0.8]
+
+with open("combined_Vir_contigs_90.fasta", "w") as fileout90:
+    with open("combined_Vir_contigs_80.fasta", "w") as fileout80:
+        for i in range(1, 6):
+            contigs = SeqIO.parse(open(f"/home/nlespera/TermProject/spades_results/spds_samp0{i}_D/contigs_10Kplus.fasta"), "fasta")
+            for fasta in contigs:
+                if fasta.id in contig_list_90:
+                    SeqIO.write(fasta, fileout90, "fasta")
+                if fasta.id in contig_list_80:
+                    SeqIO.write(fasta, fileout80, "fasta")
+```
+
+
+
+
+```{BLASTN attempt on combined 90 and combined 80 contigs locally Apr 2}
+
+# Have to do the BLAST from directory with the database (../TermProject/quasts/vir_db)
+blastn -query /home/nlespera/TermProject/vir_contigs/combined_Vir_contigs_90.fasta -task blastn -out /home/nlespera/TermProject/blastn/combined_Vir_contigs_90 -db ref_viruses_rep_genomes -evalue 0.001
+
+-num_threads (default = 1)
+-word_size 28
+
+blastn -query /home/nlespera/TermProject/vir_contigs/combined_Vir_contigs_80.fasta -task blastn -out /home/nlespera/TermProject/blastn/combined_Vir_contigs_80 -db ref_viruses_rep_genomes -evalue 0.001 -outfmt 18
+
+```
+
+
+THERE ARE SOME THAT DON'T MAP!
+
+Create another fasta with just these and use lesser eval to see families?
+Take top hits from those that do map and create QUAST reports using these references?
+
+
+```{python for getting candidate contigs only}
+from Bio import SeqIO
+
+candidates = ["NODE_667_length_11006_cov_4.427267",
+              "NODE_472_length_11114_cov_5.441903",
+              "NODE_414_length_18312_cov_15.782111",
+              "NODE_580_length_15111_cov_15.065821",
+              "NODE_684_length_13850_cov_7.647046",
+              "NODE_1018_length_10680_cov_8.711435",
+              "NODE_1091_length_10103_cov_6.410330"]
+
+with open("candidate_contigs.fasta", "w") as fileout:
+    for i in range(1, 6):
+        contigs = SeqIO.parse(open(f"/home/nlespera/TermProject/spades_results/spds_samp0{i}_D/contigs_10Kplus.fasta"), "fasta")
+        for fasta in contigs:
+            if fasta.id in candidates:
+                SeqIO.write(fasta, fileout, "fasta")
+
+
+candidates = ["NODE_667_length_11006_cov_4.427267",
+              "NODE_472_length_11114_cov_5.441903",
+              "NODE_414_length_18312_cov_15.782111",
+              "NODE_580_length_15111_cov_15.065821",
+              "NODE_684_length_13850_cov_7.647046",
+              "NODE_1018_length_10680_cov_8.711435",
+              "NODE_1091_length_10103_cov_6.410330",
+              "NODE_329_length_17848_cov_6.303097",
+              "NODE_373_length_16716_cov_6.340676",
+              "NODE_477_length_14393_cov_6.668643",
+              "NODE_661_length_11812_cov_5.605001",
+              "NODE_304_length_19372_cov_13.330279",
+              "NODE_472_length_10775_cov_5.539646",
+              "NODE_304_length_15248_cov_7.380438",
+              "NODE_441_length_14484_cov_6.337792",
+              "NODE_242_length_14698_cov_10.380865",
+              "NODE_410_length_11766_cov_5.823414",
+              "NODE_530_length_10629_cov_5.457916",
+              "NODE_286_length_22318_cov_11.094776",
+              "NODE_304_length_21579_cov_10.098820",
+              "NODE_307_length_21453_cov_9.280307",
+              "NODE_402_length_18640_cov_8.861394",
+              "NODE_414_length_18312_cov_15.782111",
+              "NODE_580_length_15111_cov_15.065821",
+              "NODE_615_length_14598_cov_19.351303",
+              "NODE_684_length_13850_cov_7.647046",
+              "NODE_778_length_12897_cov_7.176452",
+              "NODE_868_length_11988_cov_6.789491",
+              "NODE_934_length_11377_cov_9.058647",
+              "NODE_991_length_10889_cov_11.284382",
+              "NODE_1093_length_10094_cov_6.610419"]
+
+with open("candidate_contigs_80.fasta", "w") as fileout:
+    for i in range(1, 6):
+        contigs = SeqIO.parse(open(f"/home/nlespera/TermProject/spades_results/spds_samp0{i}_D/contigs_10Kplus.fasta"), "fasta")
+        for fasta in contigs:
+            if fasta.id in candidates:
+                SeqIO.write(fasta, fileout, "fasta")
+```
+
+
+
+
+
+
+
+```{blastn with candidates only}
+# Against virus ref seqs
+blastn -query /home/nlespera/TermProject/vir_contigs/candidate_contigs.fasta -task blastn -out /home/nlespera/TermProject/blastn/candidate_contigs_blast_Apr3 -db ref_viruses_rep_genomes -outfmt 18
+
+blastn -query /home/nlespera/TermProject/vir_contigs/candidate_contigs_80.fasta -task blastn -out /home/nlespera/TermProject/blastn/candidate_contigs80_blast_Apr3 -db ref_viruses_rep_genomes -outfmt 18
+
+# Against 16S_ribosomal_RNA database to confirm are likely viral
+
+blastn -query /home/nlespera/TermProject/vir_contigs/candidate_contigs.fasta -remote -task blastn -out /home/nlespera/TermProject/blastn/candidates_ref_prok_blast_Apr3 -db ref_prok_rep_genomes -outfmt 18 -max_target_seqs 5 -max_hsps 1
+```
+
+```{QUAST with references from best matches in VirFinder identified contigs}
+
+# Test with samp05
+metaquast.py -m 10000 -t 2 --references-list /home/nlespera/TermProject/quasts/vir_refs.txt --blast-db /home/nlespera/TermProject/quasts/vir_db/ref_viruses_rep_genomes.nsq /home/nlespera/TermProject/spades_results/spds_samp05_D/contigs.fasta -1 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_1.fastq.gz -2 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_2.fastq.gz -o /home/nlespera/TermProject/quasts/quast_samp05/Virs_Apr3_1
+
+
+--references-list 
+```
+
+
+```{BLASTN again - Apr 7}
+blastn -query /home/nlespera/TermProject/vir_contigs/combined_Vir_contigs_90.fasta -task blastn -out /home/nlespera/TermProject/blastn/Vir_contigs_blast_Apr7_99perc -db ref_viruses_rep_genomes -perc_identity 99 -max_target_seqs 5 -max_hsps 1
+```
+
+
+
+
+```{Python for protein sequence}
+from Bio import SeqIO
+
+with open("candidate_pred_prot_Apr7.fasta", "w") as fileout:
+    predicted_prot = SeqIO.parse(open("prod_prot_1_candidates_Apr4"), "fasta")
+    for fasta in predicted_prot:
+        if len(fasta) > 500:
+            SeqIO.write(fasta, fileout, "fasta")
+
+
+```
+
+
+
+```{BLASTP with these sequences}
+blastp -query /home/nlespera/TermProject/seqs/candidate_pred_prot_Apr7.fasta -task blastp -out /home/nlespera/TermProject/blastn/candid_prot_Apr7_blastp -remote -db nr -max_target_seqs 5 -max_hsps 1
+
+
+```
+
+
+Mapping all reads to VirCandidate (NODE 1091)
+
+```
+bowtie2-build VirCandidate.fasta VirCandidate
+
+
+bowtie2 --interleaved ../seqs/raw_seqs/ERR10856031.fastq.gz -x VirCandidate -S samp1_VirCand.SAM --local 
+
+bowtie2 --interleaved ../seqs/raw_seqs/ERR10852873.fastq.gz -x VirCandidate -S samp2_VirCand.SAM --local
+
+bowtie2 --interleaved ../seqs/raw_seqs/ERR10856075.fastq.gz -x VirCandidate -S samp3_VirCand.SAM --local
+
+bowtie2 --interleaved ../seqs/raw_seqs/ERR10867126.fastq.gz -x VirCandidate -S samp4_VirCand.SAM --local
+
+```
+
+samp02_D = ERR10852873
+samp03_D = ERR10856075
+samp04_D = ERR10867126
+
+
+
+nlespera@compute:~/TermProject/vir_contigs$ bowtie2 --interleaved ../seqs/raw_seqs/ERR10856075.fastq.gz -x VirCandidate -S samp3_VirCand.SAM --local
+4926760 reads; of these:
+  4926760 (100.00%) were paired; of these:
+    4926729 (100.00%) aligned concordantly 0 times
+    31 (0.00%) aligned concordantly exactly 1 time
+    0 (0.00%) aligned concordantly >1 times
+    4926729 pairs aligned concordantly 0 times; of these:
+      4 (0.00%) aligned discordantly 1 time
+
+
+``` {QUAST evaluation of assembly}
+metaquast.py -t 2 /home/nlespera/TermProject/spades_results/spds_samp01_D/scaffolds.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10856031.fastq.gz -o /home/nlespera/TermProject/quasts/quast_scaf_samp01 
+
+metaquast.py -t 2 /home/nlespera/TermProject/spades_results/spds_samp02_D/scaffolds.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10852873.fastq.gz -o /home/nlespera/TermProject/quasts/quast_scaf_samp02 
+
+metaquast.py -t 2 /home/nlespera/TermProject/spades_results/spds_samp03_D/scaffolds.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10856075.fastq.gz -o /home/nlespera/TermProject/quasts/quast_scaf_samp03 
+
+metaquast.py -t 2 /home/nlespera/TermProject/spades_results/spds_samp04_D/scaffolds.fasta --pe12  /home/nlespera/TermProject/seqs/raw_seqs/ERR10867126.fastq.gz -o /home/nlespera/TermProject/quasts/quast_scaf_samp04
+
+metaquast.py -t 2 /home/nlespera/TermProject/spades_results/spds_samp05_D/scaffolds.fasta -1 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_1.fastq.gz -2 /home/nlespera/TermProject/seqs/raw_seqs/ERR10856050_2.fastq.gz -o /home/nlespera/TermProject/quasts/quast_scaf_samp05
+
+```
+
+
+grep -c ">" /home/nlespera/TermProject/spades_results/spds_samp05_D/scaffolds.fasta
+
+
+grep -c ">" /home/nlespera/TermProject/spades_results/spds_samp01_D/contigs_10Kplus.fasta
+
+grep -c ">" /home/nlespera/TermProject/spades_results/spds_samp02_D/contigs_10Kplus.fasta
+
+grep -c ">" /home/nlespera/TermProject/spades_results/spds_samp03_D/contigs_10Kplus.fasta
+
+grep -c ">" /home/nlespera/TermProject/spades_results/spds_samp04_D/contigs_10Kplus.fasta
+
+grep -c ">" /home/nlespera/TermProject/spades_results/spds_samp05_D/contigs_10Kplus.fasta
+
+
+
+
+
+
+
